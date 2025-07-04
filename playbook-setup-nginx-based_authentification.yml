@@ -1,0 +1,77 @@
+---
+- name: Provision dan konfigurasi NGINX internal pada web01 dan web02
+  hosts: webservers
+  become: true
+  vars:
+    web_user: lks
+    web_pass: lks2025
+    site_root: /var/www/html/internal-site
+    domain_map:
+      web01: web01.itnsa2025-smk4.net
+      web02: web02.itnsa2025-smk4.net
+  tasks:
+    - name: Menginstal paket NGINX dan apache2-utils (untuk htpasswd)
+      apt:
+        name:
+          - nginx
+          - apache2-utils
+        update_cache: true
+        state: present
+
+    - name: Membuat direktori untuk situs internal
+      file:
+        path: "{{ site_root }}"
+        state: directory
+        mode: '0755'
+
+    - name: Membuat file index.html khusus untuk masing-masing server
+      copy:
+        dest: "{{ site_root }}/index.html"
+        content: |
+          <html>
+          <head><title>{{ inventory_hostname | upper }} - Server NGINX Internal</title></head>
+          <body>
+            <h1>Selamat Datang di Server {{ inventory_hostname | upper }}</h1>
+            <p>Server NGINX ini telah dikonfigurasi secara otomatis menggunakan Ansible.</p>
+            <p>Konfigurasi mencakup: instalasi web server, pengaturan situs kustom, dan aktivasi autentikasi dasar (HTTP Basic Auth).</p>
+            <p>Disajikan oleh: {{ inventory_hostname }} - {{ ansible_host }}</p>
+          </body>
+          </html>
+
+    - name: Membuat file .htpasswd untuk autentikasi dasar
+      command: htpasswd -bc /etc/nginx/.htpasswd {{ web_user }} {{ web_pass }}
+      args:
+        creates: /etc/nginx/.htpasswd
+
+    - name: Mengatur konfigurasi virtual host internal di port 8080
+      copy:
+        dest: /etc/nginx/sites-available/internal_site
+        content: |
+          server {
+              listen 8080;
+              server_name {{ domain_map[inventory_hostname] }};
+
+              root {{ site_root }};
+              index index.html;
+
+              auth_basic "Akses Terbatas";
+              auth_basic_user_file /etc/nginx/.htpasswd;
+          }
+
+    - name: Mengaktifkan virtual host internal
+      file:
+        src: /etc/nginx/sites-available/internal_site
+        dest: /etc/nginx/sites-enabled/internal_site
+        state: link
+        force: true
+
+    - name: Menonaktifkan situs default bawaan NGINX
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Me-restart dan mengaktifkan layanan NGINX
+      service:
+        name: nginx
+        state: restarted
+        enabled: true
