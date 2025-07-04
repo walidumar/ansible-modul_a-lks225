@@ -1,0 +1,193 @@
+---
+- name: Setup NGINX, HAProxy, dan Keepalived dengan konten unik
+  hosts: webservers
+  become: true
+  vars:
+    nginx_auth_user: lks
+    nginx_auth_pass: lks2025
+    vip_address: 10.12.10.5/29
+    keepalived_auth_pass: itnsa2025
+
+  tasks:
+    - name: Install NGINX, HAProxy, apache2-utils, dan Keepalived
+      apt:
+        name:
+          - nginx
+          - haproxy
+          - apache2-utils
+          - keepalived
+        update_cache: true
+        state: present
+
+    - name: Buat direktori untuk akses langsung (8082)
+      file:
+        path: "/var/www/html/direct"
+        state: directory
+        mode: "0755"
+
+    - name: Buat direktori untuk akses melalui HAProxy (8081)
+      file:
+        path: "/var/www/html/haproxy"
+        state: directory
+        mode: "0755"
+
+    # ========== Konten web01 ==========
+    - name: Buat index.html direct untuk web01
+      copy:
+        dest: /var/www/html/direct/index.html
+        content: |
+          <html>
+          <head><title>WEB01 - Akses Langsung</title></head>
+          <body>
+            <h1>Ini WEB01 (Akses Langsung - Port 8082)</h1>
+            <p>IP Server: 10.12.10.3</p>
+          </body>
+          </html>
+      when: inventory_hostname == "web01"
+
+    - name: Buat index.html HAProxy untuk web01
+      copy:
+        dest: /var/www/html/haproxy/index.html
+        content: |
+          <html>
+          <head><title>WEB01 via HAProxy</title></head>
+          <body>
+            <h1>Ini WEB01 (Akses melalui HAProxy - Port 8081)</h1>
+            <p>IP Server: 10.12.10.3</p>
+          </body>
+          </html>
+      when: inventory_hostname == "web01"
+
+    # ========== Konten web02 ==========
+    - name: Buat index.html direct untuk web02
+      copy:
+        dest: /var/www/html/direct/index.html
+        content: |
+          <html>
+          <head><title>WEB02 - Akses Langsung</title></head>
+          <body>
+            <h1>Ini WEB02 (Akses Langsung - Port 8082)</h1>
+            <p>IP Server: 10.12.10.4</p>
+          </body>
+          </html>
+      when: inventory_hostname == "web02"
+
+    - name: Buat index.html HAProxy untuk web02
+      copy:
+        dest: /var/www/html/haproxy/index.html
+        content: |
+          <html>
+          <head><title>WEB02 via HAProxy</title></head>
+          <body>
+            <h1>Ini WEB02 (Akses melalui HAProxy - Port 8081)</h1>
+            <p>IP Server: 10.12.10.4</p>
+          </body>
+          </html>
+      when: inventory_hostname == "web02"
+
+    # ========== Basic Auth ==========
+    - name: Buat file .htpasswd untuk autentikasi dasar
+      command: htpasswd -bc /etc/nginx/.htpasswd {{ nginx_auth_user }} {{ nginx_auth_pass }}
+      args:
+        creates: /etc/nginx/.htpasswd
+
+    # ========== Konfigurasi NGINX ==========
+    - name: Konfigurasi NGINX untuk akses langsung (port 8082)
+      copy:
+        dest: /etc/nginx/sites-available/direct_site
+        content: |
+          server {
+              listen 8082;
+              server_name localhost;
+              auth_basic "Akses Terbatas";
+              auth_basic_user_file /etc/nginx/.htpasswd;
+              root /var/www/html/direct;
+              index index.html;
+          }
+
+    - name: Konfigurasi NGINX untuk HAProxy (port 8081)
+      copy:
+        dest: /etc/nginx/sites-available/haproxy_site
+        content: |
+          server {
+              listen 8081;
+              server_name localhost;
+              root /var/www/html/haproxy;
+              index index.html;
+          }
+
+    - name: Enable konfigurasi virtualhost NGINX
+      file:
+        src: "/etc/nginx/sites-available/{{ item }}"
+        dest: "/etc/nginx/sites-enabled/{{ item }}"
+        state: link
+        force: true
+      loop:
+        - direct_site
+        - haproxy_site
+
+    - name: Nonaktifkan default site NGINX
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    # ========== Konfigurasi HAProxy ==========
+    - name: Konfigurasi HAProxy
+      blockinfile:
+        path: /etc/haproxy/haproxy.cfg
+        marker: "# {mark} KONFIGURASI ANSIBLE HAPROXY"
+        block: |
+          frontend http_front
+              bind *:80
+              default_backend web_backend
+
+          backend web_backend
+              balance roundrobin
+              option httpchk GET /
+              server web01 10.12.10.3:8081 check
+              server web02 10.12.10.4:8081 check
+
+          listen stats
+              bind :8080
+              stats enable
+              stats uri /stats
+              stats auth admin:admin123
+
+    # ========== Konfigurasi Keepalived ==========
+    - name: Konfigurasi Keepalived
+      copy:
+        dest: /etc/keepalived/keepalived.conf
+        content: |
+          vrrp_instance VI_1 {
+              state {{ 'MASTER' if inventory_hostname == 'web01' else 'BACKUP' }}
+              interface {{ ansible_default_ipv4.interface }}
+              virtual_router_id 51
+              priority {{ 100 if inventory_hostname == 'web01' else 90 }}
+              advert_int 1
+              authentication {
+                  auth_type PASS
+                  auth_pass {{ keepalived_auth_pass }}
+              }
+              virtual_ipaddress {
+                  {{ vip_address }}
+              }
+          }
+
+    # ========== Restart Services ==========
+    - name: Restart NGINX
+      service:
+        name: nginx
+        state: restarted
+        enabled: true
+
+    - name: Restart HAProxy
+      service:
+        name: haproxy
+        state: restarted
+        enabled: true
+
+    - name: Restart Keepalived
+      service:
+        name: keepalived
+        state: restarted
+        enabled: true
